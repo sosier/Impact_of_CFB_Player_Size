@@ -1,0 +1,684 @@
+---
+title: "College Football Player Size Exploration"
+author: "Sean Osier (smo2152)"
+date: "2023-04-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(glue)
+```
+
+## Load Data
+
+```{r}
+# Load Data
+players <- read_csv("cfb_players_2022.csv")
+records <- read_csv("cfb_team_records_2022.csv")
+
+# Preview Data
+players
+records
+```
+
+## Helper Functions
+
+```{r}
+
+clean_position_data <- function(df) {
+  df %>%
+    # Clean up position data:
+    filter(
+      # Exclude "Athletes" (ATH) who don't have a set / decided position:
+      position != "ATH",
+      # Only 1 player is listed as a designated Punt Returner (PR):
+      position != "PR",
+    ) %>% 
+    mutate(
+      position = case_when(
+        # Most teams don't list specific Offensive Line (OL) positions:
+        position %in% c("C", "G", "OT") ~ "OL",
+        # More teams list specific Defensive Line (DL) positions, but not all:
+        position %in% c("DE", "DT", "NT") ~ "DL",
+        # It's more common for teams to list specific Defensive Back (DB)
+        # positions, but again many teams do not:
+        position %in% c("CB", "S") ~ "DB",
+        # The Full Back (FB) position is antiquated in many modern offenses.
+        # For teams that do use the position usage varies and either Running
+        # Back (RB) or Tight End (TE) could be appropriate. In triple option
+        # offense teams like Air Force and Navy, RB is the closest position. In
+        # others TE is closest:
+        position %in% c("FB") & team %in% c("Air Force", "Navy") ~ "RB",
+        position %in% c("FB") ~ "TE",
+        TRUE ~ position
+      )
+    )
+}
+
+calculate_bmi <- function(players) {
+  players %>%
+    mutate(bmi = 703 * weight / height^2)
+}
+
+calculate_summary_metrics <- function(grouped_df) {
+  grouped_df %>%
+    summarize(
+      height = mean(height),
+      weight = mean(weight),
+      bmi = mean(bmi),
+      n = n()
+    )
+}
+
+calculate_summary_by <- function(players, ...) {
+  players %>%
+    group_by(...) %>%
+    calculate_summary_metrics()
+}
+```
+
+## Clean & Summarize Data
+
+```{r}
+players <- players %>%
+  clean_position_data() %>%
+  calculate_bmi()
+
+position_summary <- players %>%
+  calculate_summary_by(position)
+
+team_summary <- players %>%
+  calculate_summary_by(team) %>% 
+  left_join(records) %>%
+  select(-year)
+
+team_position_summary <- players %>%
+  calculate_summary_by(team, position) %>% 
+  left_join(records) %>%
+  select(-year)
+
+position_summary
+team_summary
+team_position_summary
+```
+
+## Position Height, Weight Analyses
+
+```{r}
+position_summary %>%
+  arrange(height) %>%
+  ggplot(aes(x=height, y=reorder(position, height), label=round(height, 1))) +
+    geom_bar(stat="identity", fill="navy") +
+    geom_text(nudge_x=2.5) +
+    theme_minimal() +
+    ggtitle("Average Height by Position Group") +
+    xlab("Average Height (inches)") +
+    ylab("Position Group") +
+    theme(plot.title=element_text(face = "bold"))
+
+position_summary %>%
+  arrange(weight) %>%
+  ggplot(aes(x=weight, y=reorder(position, weight), label=round(weight, 1))) +
+    geom_bar(stat="identity", fill="navy") +
+    geom_text(nudge_x=max(position_summary$weight) * 0.04) +
+    theme_minimal() +
+    ggtitle("Average Weight by Position Group") +
+    xlab("Average Weight (pounds)") +
+    ylab("Position Group") +
+    theme(plot.title=element_text(face = "bold"))
+
+position_summary %>%
+  arrange(bmi) %>%
+  ggplot(aes(x=bmi, y=reorder(position, bmi), label=round(bmi, 1))) +
+    geom_bar(stat="identity", fill="navy") +
+    geom_text(nudge_x=max(position_summary$bmi) * 0.04) +
+    theme_minimal() +
+    ggtitle("Average BMI by Position Group") +
+    xlab("Average Body Mass Index (BMI; kg/m^2)") +
+    ylab("Position Group") +
+    theme(plot.title=element_text(face = "bold"))
+```
+
+```{r}
+height_ANOVA <- players %>%
+  clean_position_data() %>% 
+  aov(height ~ position, .)
+
+summary(height_ANOVA)
+
+weight_ANOVA <- players %>%
+  clean_position_data() %>% 
+  aov(weight ~ position, .)
+
+summary(weight_ANOVA)
+
+bmi_ANOVA <- players %>%
+  clean_position_data() %>% 
+  aov(bmi ~ position, .)
+
+summary(bmi_ANOVA)
+```
+
+```{r}
+TukeyHSD(height_ANOVA, conf.level=0.95,)$position %>%
+  as.data.frame() %>%
+  arrange(desc(`p adj`))
+
+TukeyHSD(weight_ANOVA, conf.level=0.95)$position %>%
+  as.data.frame() %>%
+  arrange(desc(`p adj`))
+
+TukeyHSD(bmi_ANOVA, conf.level=0.95)$position %>%
+  as.data.frame() %>%
+  arrange(desc(`p adj`))
+
+
+# Formatting for Appendix:
+# TukeyHSD(weight_ANOVA, conf.level=0.95)$position %>%
+#   as.data.frame() %>%
+#   arrange(desc(`p adj`)) %>%
+#   select(`p adj`) %>%
+#   filter(`p adj` > 0.05) %>%
+#   select(-`p adj`)
+```
+
+## Binomial Regression
+
+### Format Data for Regression
+
+```{r}
+position_heights_by_team <- team_position_summary %>%
+  select(team, position, height) %>%
+  pivot_wider(names_from = position, values_from = height, names_prefix = "height_")
+
+position_weights_by_team <- team_position_summary %>%
+  select(team, position, weight) %>%
+  pivot_wider(names_from = position, values_from = weight, names_prefix = "weight_")
+
+position_bmis_by_team <- team_position_summary %>%
+  select(team, position, bmi) %>%
+  pivot_wider(names_from = position, values_from = bmi, names_prefix = "bmi_")
+
+team_position_summary_wide <- records %>%
+  select(-year) %>%
+  left_join(position_heights_by_team) %>%
+  left_join(position_weights_by_team) %>% 
+  left_join(position_bmis_by_team)
+
+team_position_summary_wide
+```
+
+### Aside on Properly Performing Binomial Regression in R
+
+Performing true _binomial_ regression in R (NOT logistic) is quite tricky and requires very careful use of the parameters to `glm`. The are two main approaches:
+
+ 1. Explicitly providing the number of binomial successes / failures in the response variable:
+ 
+ Buried in the `glm` documentation:
+ > For binomial and quasibinomial families the response can also be specified as a factor (when the first level denotes failure and all others success) or as a two-column matrix with the columns giving the numbers of successes and failures.
+ 
+ 2. Passing the proportion of successes along with the total number of trials as :
+ 
+ Buried in the `glm` documentation:
+ > For a binomial GLM prior `weights` are used to give the number of trials when the response is the proportion of successes
+
+The two approaches are functionally equivalent, but can produce slightly different outputs due to rounding issues. You can see this in this cell:
+
+```{r}
+team_summary %>%
+  glm(
+    cbind(wins, losses) ~ height + weight + bmi,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+
+team_summary %>%
+  glm(
+    win_percentage ~ height + weight + bmi,
+    weights = games,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+```
+
+The 2 models in this cell show that when there is no complicated rounding, the two approaches above yield identical outputs:
+
+```{r}
+team_summary %>%
+  filter(
+    games == 12,
+    wins != 7,
+    wins != 5,
+    wins != 4,
+    wins != 2,
+    wins != 1,
+  ) %>%
+  glm(
+    cbind(wins, losses) ~ height + weight + bmi,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+
+team_summary %>%
+  filter(
+    games == 12,
+    wins != 7,
+    wins != 5,
+    wins != 4,
+    wins != 2,
+    wins != 1,
+  ) %>%
+  glm(
+    win_percentage ~ height + weight + bmi,
+    weights = games,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+```
+
+For maximum accuracy, I will prefer the explicit successes / failures approach so as to not have the function introduce small errors by rounding an already rounded proportion.
+
+### Overall Height, Weight, BMI
+
+```{r}
+team_summary %>%
+  glm(
+    cbind(wins, losses) ~ height + weight + bmi,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+```
+
+### Overall Height & Weight
+
+```{r}
+team_summary %>%
+  glm(
+    cbind(wins, losses) ~ height + weight,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+```
+
+### Overall Univariate
+
+```{r}
+team_summary %>%
+  glm(
+    cbind(wins, losses) ~ height,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+
+team_summary %>%
+  glm(
+    cbind(wins, losses) ~ weight,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+
+team_summary %>%
+  glm(
+    cbind(wins, losses) ~ bmi,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+```
+
+```{r}
+log_odds_to_prob <- function(log_odds) {
+  odds <- exp(log_odds)
+  odds / (1 + odds)
+}
+
+win_prob_change_weight <- function(weight_change) {
+  intercept <- -10.56900
+  coeff <- 0.04653
+  mean_weight <- mean(team_summary$weight)
+  (
+    log_odds_to_prob(intercept + coeff * (mean_weight + weight_change))
+    - log_odds_to_prob(intercept + coeff * mean_weight)
+  )
+}
+
+win_prob_change_weight(-10)
+win_prob_change_weight(-1)
+win_prob_change_weight(1)
+win_prob_change_weight(10)
+1/12
+win_prob_change_weight(7.341706)
+```
+
+
+### All Heights, Weights, BMIs by Position Group
+
+```{r}
+team_position_summary_wide %>%
+  glm(
+    cbind(wins, losses) ~ . -team -games -win_percentage,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+```
+
+### All BMIs by Position Group
+
+```{r}
+team_position_summary_wide %>%
+  glm(
+    cbind(wins, losses) ~
+      bmi_LS +
+      bmi_PK +
+      bmi_P +
+      bmi_WR +
+      bmi_OL +
+      bmi_LB +
+      bmi_RB +
+      bmi_QB +
+      bmi_DB +
+      bmi_DL +
+      bmi_TE,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+```
+
+### Maximizing Significant Features - Height & Weight
+
+```{r}
+best_model_height_weight <- team_position_summary_wide %>%
+  glm(
+    cbind(wins, losses) ~
+      # height_LS +  # Exclude special teams
+      # height_P +
+      # height_PK +
+      # height_LB +  # Least significant
+      # height_DB +  # 2nd least significant
+      # height_RB +  # Etc.
+      # height_WR +
+      # height_OL +
+      # height_DL +
+      # height_TE +
+      height_QB +
+      # weight_LS +  # Exclude special teams
+      # weight_PK +
+      # weight_P +
+      # weight_WR +  # Least significant
+      # weight_OL +  # 2nd least significant
+      # weight_LB +  # Etc.
+      # weight_RB +
+      # weight_QB +
+      weight_DB +
+      weight_DL +
+      weight_TE,
+    family = "binomial",
+    data=.,
+  )
+
+best_model_height_weight %>%
+  summary()
+```
+
+```{r}
+win_prob_change_position_weight <- function(QB=0, DB=0, DL=0, TE=0) {
+  baseline <- best_model_height_weight %>%
+    predict(newdata=data_frame(
+      height_QB=mean(team_position_summary_wide$height_QB, na.rm=TRUE),
+      weight_DB=mean(team_position_summary_wide$weight_DB, na.rm=TRUE),
+      weight_DL=mean(team_position_summary_wide$weight_DL, na.rm=TRUE),
+      weight_TE=mean(team_position_summary_wide$weight_TE, na.rm=TRUE)
+    ))
+  
+  new <- best_model_height_weight %>%
+    predict(newdata=data_frame(
+      height_QB=mean(team_position_summary_wide$height_QB, na.rm=TRUE) + QB,
+      weight_DB=mean(team_position_summary_wide$weight_DB, na.rm=TRUE) + DB,
+      weight_DL=mean(team_position_summary_wide$weight_DL, na.rm=TRUE) + DL,
+      weight_TE=mean(team_position_summary_wide$weight_TE, na.rm=TRUE) + TE
+    ))
+  
+  (
+    log_odds_to_prob(new[[1]])
+    - log_odds_to_prob(baseline[[1]])
+  )
+}
+
+win_prob_change_position_weight(DB=-1)
+win_prob_change_position_weight(DL=-1)
+win_prob_change_position_weight(TE=-1)
+
+win_prob_change_position_weight(DB=1)
+win_prob_change_position_weight(DL=1)
+win_prob_change_position_weight(TE=1)
+
+win_prob_change_position_weight(DB=10)
+win_prob_change_position_weight(DL=10)
+win_prob_change_position_weight(TE=10)
+
+win_prob_change_position_weight(DB=9.46)
+win_prob_change_position_weight(DL=27.42)
+win_prob_change_position_weight(TE=12.65)
+```
+
+
+### Maximizing Significant Features - BMI
+
+```{r}
+team_position_summary_wide %>%
+  glm(
+    cbind(wins, losses) ~
+      # bmi_LS +  # Exclude special teams
+      # bmi_PK +
+      # bmi_P +
+      # bmi_OL +
+      # bmi_WR +
+      # bmi_RB +
+      # bmi_QB +
+      # bmi_LB +
+      bmi_DB +
+      bmi_TE +
+      bmi_DL,
+    family = "binomial",
+    data=.,
+  ) %>%
+  summary()
+```
+
+## Scatter Plots
+
+```{r}
+
+team_summary %>% 
+  ggplot(aes(x=height, y=win_percentage)) +
+    geom_point() +
+    theme_minimal() +
+    ggtitle("Average Team Height vs. Win Percentage") +
+    xlab("Average Height (inches)") +
+    ylab("Win Percentage") +
+    scale_y_continuous(labels = scales::percent) +
+    theme(plot.title=element_text(face = "bold"))
+
+team_summary %>% 
+  ggplot(aes(x=weight, y=win_percentage)) +
+    geom_point() +
+    theme_minimal() +
+    ggtitle("Average Team Weight vs. Win Percentage") +
+    xlab("Average Weight (pounds)") +
+    ylab("Win Percentage") +
+    scale_y_continuous(labels = scales::percent) +
+    theme(plot.title=element_text(face = "bold"))
+
+team_summary %>% 
+  ggplot(aes(x=bmi, y=win_percentage)) +
+    geom_point() +
+    theme_minimal() +
+    ggtitle("Average Team BMI vs. Win Percentage") +
+    xlab("Average Body Mass Index (BMI; kg/m^2)") +
+    ylab("Win Percentage") +
+    scale_y_continuous(labels = scales::percent) +
+    theme(plot.title=element_text(face = "bold"))
+
+```
+
+```{r}
+team_position_summary %>%
+  filter(position == "TE") %>%
+  ggplot(aes(x=weight, y=win_percentage)) +
+    geom_point() +
+    theme_minimal() +
+    ggtitle("Average TE Weight vs. Win Percentage") +
+    xlab("Average Weight (pounds)") +
+    ylab("Win Percentage") +
+    scale_y_continuous(labels = scales::percent) +
+    theme(plot.title=element_text(face = "bold"))
+
+team_position_summary %>%
+  filter(position == "DL") %>%
+  ggplot(aes(x=weight, y=win_percentage)) +
+    geom_point() +
+    theme_minimal() +
+    ggtitle("Average DL Weight vs. Win Percentage") +
+    xlab("Average Weight (pounds)") +
+    ylab("Win Percentage") +
+    scale_y_continuous(labels = scales::percent) +
+    theme(plot.title=element_text(face = "bold"))
+
+team_position_summary %>%
+  filter(position == "DB") %>%
+  ggplot(aes(x=weight, y=win_percentage)) +
+    geom_point() +
+    theme_minimal() +
+    ggtitle("Average DB Weight vs. Win Percentage") +
+    xlab("Average Weight (pounds)") +
+    ylab("Win Percentage") +
+    scale_y_continuous(labels = scales::percent) +
+    theme(plot.title=element_text(face = "bold"))
+
+```
+
+```{r}
+team_position_summary %>%
+  filter(position == "QB") %>%
+  ggplot(aes(x=height, y=win_percentage)) +
+    geom_point() +
+    theme_minimal() +
+    ggtitle("Average QB Height vs. Win Percentage") +
+    xlab("Average Height (inches)") +
+    ylab("Win Percentage") +
+    scale_y_continuous(labels = scales::percent) +
+    theme(plot.title=element_text(face = "bold"))
+
+```
+
+```{r}
+team_position_summary %>%
+  filter(position == "DL") %>%
+  ggplot(aes(x=bmi, y=win_percentage)) +
+    geom_point() +
+    theme_minimal()
+
+team_position_summary %>%
+  filter(position == "TE") %>%
+  ggplot(aes(x=bmi, y=win_percentage)) +
+    geom_point() +
+    theme_minimal()
+
+team_position_summary %>%
+  filter(position == "DB") %>%
+  ggplot(aes(x=bmi, y=win_percentage)) +
+    geom_point() +
+    theme_minimal()
+
+```
+
+## Conditional Plots
+
+```{r}
+# Plot Helpers
+plot_win_percent_by_quartile <- function(df, metric, metric_title) {
+  df %>%
+    ungroup() %>%
+    mutate(quartile = ntile({{ metric }}, 4)) %>% 
+    group_by(quartile) %>%
+    summarize(
+      win_percentage = mean(win_percentage),
+      n = sum(n)
+    ) %>%
+    ggplot(aes(x=quartile, y=win_percentage, label=scales::percent(win_percentage, 1))) +
+      geom_col() +
+      geom_text(nudge_y=0.015) +
+      theme_minimal() +
+      ggtitle(glue("Expected Win Percentage Given {metric_title} Quartile")) +
+      xlab(glue("Average {metric_title} Quartile")) +
+      ylab("Win Percentage") +
+      scale_y_continuous(labels = scales::percent) +
+      theme(plot.title=element_text(face = "bold"))
+}
+```
+
+
+```{r}
+team_summary %>%
+  plot_win_percent_by_quartile(height, "Height")
+
+team_summary %>%
+  plot_win_percent_by_quartile(weight, "Weight")
+
+team_summary %>%
+  plot_win_percent_by_quartile(bmi, "BMI")
+
+```
+
+```{r}
+team_position_summary %>%
+  filter(position == "QB") %>%
+  plot_win_percent_by_quartile(height, "QB Height")
+
+```
+
+```{r}
+team_position_summary %>%
+  filter(position == "DL") %>%
+  plot_win_percent_by_quartile(weight, "DL Weight")
+
+team_position_summary %>%
+  filter(position == "TE") %>%
+  plot_win_percent_by_quartile(weight, "TE Weight")
+
+team_position_summary %>%
+  filter(position == "DB") %>%
+  plot_win_percent_by_quartile(weight, "DB Weight")
+
+```
+
+```{r}
+team_position_summary %>%
+  filter(position == "DL") %>%
+  plot_win_percent_by_quartile(bmi, "DL BMI")
+
+team_position_summary %>%
+  filter(position == "TE") %>%
+  plot_win_percent_by_quartile(bmi, "TE BMI")
+
+team_position_summary %>%
+  filter(position == "DB") %>%
+  plot_win_percent_by_quartile(bmi, "DB BMI")
+
+```
+
